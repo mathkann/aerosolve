@@ -4,6 +4,7 @@ import java.io.{StringReader, BufferedWriter, BufferedReader, StringWriter}
 
 import com.airbnb.aerosolve.core.models.ModelFactory
 import com.airbnb.aerosolve.core.{Example, FeatureVector}
+import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import org.apache.spark.SparkContext
 import org.junit.Test
@@ -14,57 +15,73 @@ import scala.collection.JavaConverters._
 
 import scala.collection.mutable.ArrayBuffer
 
-class BoostedStumpsModelTest {
-  val log = LoggerFactory.getLogger("BoostedStumpsModelTest")
-
-  def makeConfig(loss : String) : String = {
+class ForestTrainerTest {
+  def makeConfig(splitCriteria : String) : String = {
     """
       |identity_transform {
       |  transform : list
       |  transforms: []
       |}
       |model_config {
-      |  loss : "%s"
-      |  num_bags : 1
       |  rank_key : "$rank"
-      |  num_candidates : 100
+      |  split_criteria : "%s"
+      |  num_candidates : 1000
       |  rank_threshold : 0.0
-      |  dropout : 0.0
-      |  learning_rate : 0.1
-      |  lambda : 0.1
-      |  lambda2 : 0.1
-      |  subsample : 0.1
-      |  iterations : 10
+      |  max_depth : 5
+      |  min_leaf_items : 5
+      |  num_tries : 10
+      |  num_trees : 5
       |  context_transform : identity_transform
       |  item_transform : identity_transform
       |  combined_transform : identity_transform
       |}
-    """.stripMargin.format(loss)
+    """.stripMargin
+      .format(splitCriteria)
   }
 
   @Test
-  def testBoostedStumpTrainerLogistic : Unit = {
-    testBoostedStumpTrainer("logistic")
+  def testForestTrainerHellinger() = {
+    val config = ConfigFactory.parseString(makeConfig("hellinger"))
+    ForestTrainerTestHelper.testForestTrainer(config, false, 0.8)
   }
-
+  
   @Test
-  def testBoostedStumpTrainerHinge : Unit = {
-    testBoostedStumpTrainer("hinge")
+  def testForestTrainerGini() = {
+    val config = ConfigFactory.parseString(makeConfig("gini"))
+    ForestTrainerTestHelper.testForestTrainer(config, false, 0.8)
   }
+  
+  @Test
+  def testForestTrainerInformationGain() = {
+    val config = ConfigFactory.parseString(makeConfig("information_gain"))
+    ForestTrainerTestHelper.testForestTrainer(config, false, 0.8)
+  }
+  
+}
 
-  def testBoostedStumpTrainer(loss : String) = {
+object ForestTrainerTestHelper {
+  val log = LoggerFactory.getLogger("ForestTrainerTest")
+
+  def testForestTrainer(config : Config, boost : Boolean, expectedCorrect : Double) = {
+
     val (examples, label, numPos) = TrainingTestHelper.makeClassificationExamples
 
-    var sc = new SparkContext("local", "BoostedStumpsTEst")
+    var sc = new SparkContext("local", "ForestTrainerTest")
 
     try {
-      val config = ConfigFactory.parseString(makeConfig(loss))
-
       val input = sc.parallelize(examples)
-      val model = BoostedStumpsTrainer.train(sc, input, config, "model_config")
+      val model = if (boost) {
+        BoostedForestTrainer.train(sc, input, config, "model_config")
+      } else {
+        ForestTrainer.train(sc, input, config, "model_config")
+      }
 
-      val stumps = model.getStumps.asScala
-      stumps.foreach(stump => log.info(stump.toString))
+      val trees = model.getTrees.asScala
+      for (tree <- trees) {
+        log.info("Tree:")
+        val stumps = tree.getStumps.asScala
+        stumps.foreach(stump => log.info(stump.toString))
+      }
 
       var numCorrect : Int = 0;
       var i : Int = 0;
@@ -79,7 +96,7 @@ class BoostedStumpsModelTest {
       val fracCorrect : Double = numCorrect * 1.0 / examples.length
       log.info("Num correct = %d, frac correct = %f, num pos = %d, num neg = %d"
                  .format(numCorrect, fracCorrect, numPos, examples.length - numPos))
-      assertTrue(fracCorrect > 0.50)
+      assertTrue(fracCorrect > expectedCorrect)
 
       val swriter = new StringWriter();
       val writer = new BufferedWriter(swriter);
